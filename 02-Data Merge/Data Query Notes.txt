@@ -1,0 +1,127 @@
+Data Cleaning Notes
+(Updated on 3/29)
+
+
+Part I - Extract data from Statement of Income, Balance Sheet, and Statement of Cash Flows in all 10-K reports:
+
+
+1. Get all section sequence ids of each statement in 10K: 
+* Join table report_presentation_section and company_submissin, filter by statement_type  = ‘I’, ‘B’, ‘C’ and document_type = ‘10-K’ reports ids from the previous step to filter section_sequence_id of each statement
+   * Query file name: get_statement_id_and_other_info
+   * Result table: statement_section_ids_and_other_info
+SELECT *
+FROM sec_financial_statements.report_presentation_section rep_sec
+WHERE statement_type = 'C'
+        OR statement_type = 'I'
+        OR statement_type = 'B'
+        AND accession_number_int IN 
+    (SELECT accession_number_int
+    FROM sec_financial_statements.company_submission
+    WHERE document_type = '10-K') -- ALL 10k reports id
+
+
+2. Get all line sequence items for each statement in 10K (a intermediate step to link section and data points):
+* Join table report_presentation_line_item and statement_section_ids_and_other_info, on accession_number_int and section_sequence_id
+   * Query file name: filter_relevant_lines
+   * Result table: statement_line_items
+
+
+SELECT *
+FROM sec_financial_statements.report_presentation_line_item li
+INNER JOIN sec_financial_statements.statement_section_ids_and_other_info sec
+    ON li.accession_number_int = sec.accession_number_int
+        AND li.section_sequence_id = sec.section_sequence_id 
+
+
+
+
+
+
+3. Get all data points related to three primary statements in 10K:
+* Join table statement_line_items and table data_point on datapoint_id
+   * Query file name: query_annual_statement_data
+   * Result table: annual_statement_data
+
+
+SELECT dp.*,
+         li.parent_datapoint_name,
+         li.datapoint_label,
+         li.statement_type,
+         li.report_section_description
+FROM sec_financial_statements.statement_line_items li
+INNER JOIN sec_financial_statements.data_point dp
+    ON li.datapoint_id = dp.datapoint_id
+ORDER BY  cik, accession_number_int, line_item_sequence ASC ,end_date DESC
+
+
+        
+4. Add most recent company information to annual_statement_data:
+   * Get most recent company info: from table company_submission, select distinct cik, company_name and assigned_sic of each company’s most recent filing; 
+      * Query file name: get_most_recent_comp_info_1
+      * Result table: most_recent_comp_info
+
+
+SELECT DISTINCT t1.cik, t1.company_name, t1.assigned_sic
+FROM sec_financial_statements.company_submission t1
+INNER JOIN
+(SELECT cik, max(filing_date) AS filing_date
+FROM sec_financial_statements.company_submission
+GROUP BY cik) AS temp
+ON t1.cik = temp.cik AND t1.filing_date = temp.filing_date -- get the most recent record
+
+
+   * Join table annual_statement_data and most_comp_info on cik 
+      * Query file name: add_most_recent_comp_info
+      * Result table: statement_data_with_comp_info
+      * **Caution: 比annual data 多了452行; remove duplicates** 
+SELECT t1.*, t2.company_name, t2.assigned_sic
+FROM sec_financial_statements.annual_statement_data t1
+LEFT JOIN sec_financial_statements.most_recent_comp_info t2
+ON t1.cik = t2.cik
+
+
+
+
+
+
+
+
+5. Add fiscal year focus to annual_statement_data:
+* Get fiscal year focus info for each 10-K filing: from company_submission, select accession_number_int, fiscal_year_focus
+   * Result table: fiscal_year_focus
+
+
+SELECT DISTINCT accession_number_int, fiscal_year_focus
+FROM company_submission
+WHERE document_type = '10-K'
+
+
+* Join statement_data_with_comp_info with fiscal_year_focus on accession_number_int
+   * Query file name: join_fiscal_year_focus
+   * Result table: annual_statement_data_v1
+SELECT t1.cik,
+         t1.company_name,
+         t1.assigned_sic,
+         t1.accession_number_int,
+         t1.filing_date,
+         t2.document_fiscal_year_focus,
+         t1.datapoint_id,
+         t1.datapoint_name,
+         t1.datapoint_label,
+         t1.start_date,
+         t1.end_date,
+         t1.period_month,
+         t1.string_value,
+         t1.numeric_value,
+         t1.decimals,
+         t1.unit,
+         t1.parent_datapoint_name,
+         t1.statement_type,
+         t1.report_section_description,
+         t1.version,
+         t1.segment_label,
+         t1.segment_hash,
+         t1.footnotes
+FROM sec_financial_statements.statement_data_with_comp_info AS t1
+LEFT JOIN fiscal_year_focus AS t2
+    ON t1.accession_number_int = t2.accession_number_int
